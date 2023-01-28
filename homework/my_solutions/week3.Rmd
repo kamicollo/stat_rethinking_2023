@@ -286,51 +286,43 @@ ggplot(ex4_samples) + geom_density(aes(x=bf, color='direct_effect')) +
 
 ```
 ```{r}
-sim = function(n=1000) {
+sim = function(n=10000, bAF=0.88, bUF=0, bFG=0.9, bUG=0, bFW=0.47, bGW=-0.57, Fsigma=1) {
   Area = rnorm(n)
   U = rnorm(n)
-  Food = rnorm(n, 2 * Area - 0 * U)
-  Group = rnorm(n, 1 * Food + U * 0)
-  Weight = rnorm(n, 1 * Food + Group * 0.5)
+  Food = rnorm(n, bAF * Area + bUF * U, Fsigma)
+  Group = rnorm(n, bFG * Food + bUG * U)
+  Weight = rnorm(n, bFW * Food + bGW * Group)
   
   tibble(Area, Food, Group, Weight)
 }
-
-data = sim()
 
 ```
 
 ```{r}
 
+data = sim(bFW=0.47, bUF=1, bUG=-1, Fsigma=0.1)
+
 ex4_model_instrument = quap(
   flist = alist(
     Weight ~ dnorm(mu, sigma),
     Weight ~ dnorm(mu_total, sigma_total),
-    #Food ~ dnorm(mu_f, sigma_area),
-    #mu_f <- Area * ba,
-    mu <- bf * Food + bw*Group,
-    mu_total <- bf_total * Food,
+    Food ~ dnorm(mu_f, sigma_area),
+    mu_f <- Area * ba,
+    mu <- bf * mu_f + bw*Group,
+    mu_total <- bf_total * mu_f,
     ba ~ dnorm(0, 0.5),
     bw ~ dnorm(0, 0.5),
     bf ~ dnorm(0, 0.5),
     bf_total ~ dnorm(0, 0.5),
     sigma ~ dexp(1),
-    sigma_total ~ dexp(1)
-    #sigma_area ~ dexp(1)
+    sigma_total ~ dexp(1),
+    sigma_area ~ dexp(1)
   ), 
   data=data
 )
 
 precis(ex4_model_instrument)
-ex4_instrument_samples = extract.samples(ex4_model_instrument)
 
-ggplot(ex4_instrument_samples) + geom_density(aes(x=bf, color='direct_effect')) +
-  geom_density(aes(x=bf_total, color='total_effect')) +
-  labs(
-  title=paste(
-    'Effect of food on expected weight'
-  )
-)
 ```
 
 
