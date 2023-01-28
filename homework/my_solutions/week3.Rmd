@@ -1,0 +1,337 @@
+---
+title: "Week 3 solutions"
+output: html_notebook
+---
+
+
+
+```{r}
+library(rethinking)
+library(tidyverse)
+library(ggplot2)
+data("foxes")
+library(dagitty)
+
+```
+
+# Preview & understand the data
+
+```{r}
+summary(foxes)
+```
+
+
+# Exercise 1
+
+```{r}
+dag = dagitty("dag {
+  Area -> Food;
+  Food -> Group_Size;
+  Group_Size -> Weight;
+  Food -> Weight
+}", layout = T)
+
+outcomes(dag) = "Food"
+exposures(dag) = "Area"
+
+plot(dag)
+
+```
+To estimate the total causal effect of `Area` to `Food`, we don't need any adjustments.
+
+```{r}
+
+dt = list(
+  Food = standardize(foxes$avgfood),
+  Area = standardize(foxes$area)
+)
+
+model = quap(
+  flist = alist(
+    Food ~ dnorm(mu, sigma),
+    mu <- bf * Area,
+    bf ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=dt
+)
+
+precis(model)
+samples = extract.samples(model)
+
+ggplot(samples) + geom_density(aes(x=bf)) + labs(
+  title=paste(
+    'Impact of area change amounting to',
+    round(sd(foxes$area),3), 
+    'on expected food quantity'
+  )
+)
+```
+
+It's interesting that a non-centered model yields parameters closer to 0..
+
+```{r}
+model_noncentered = quap(
+  flist = alist(
+    avgfood ~ dnorm(mu, sigma),
+    mu <- a + bf * area,
+    bf ~ dnorm(0, 1),
+    a ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=foxes
+)
+
+precis(model_noncentered)
+samples = extract.samples(model_noncentered)
+
+ggplot(samples) + geom_density(aes(x=bf)) + labs(
+  title=paste(
+    'Impact of area change amounting to',
+    round(sd(foxes$area),3), 
+    'on expected food quantity'
+  )
+)
+```
+
+How about using Student-T distribution to account for outliers?
+
+```{r}
+model_student_non_centered = quap(
+  flist = alist(
+    avgfood ~ dstudent(2, mu, sigma),
+    mu <- a + bf * area,
+    bf ~ dnorm(0, 1),
+    a ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=foxes
+)
+
+precis(model_student_non_centered)
+samples = extract.samples(model_student_non_centered)
+
+ggplot(samples) + geom_density(aes(x=bf)) + labs(
+  title=paste(
+    'Impact of area change amounting to',
+    round(sd(foxes$area),3), 
+    'on expected food quantity'
+  )
+)
+
+```
+```{r}
+model_student = quap(
+  flist = alist(
+    Food ~ dstudent(2, mu, sigma),
+    mu <- bf * Area,
+    bf ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=dt
+)
+
+precis(model_student)
+samples = extract.samples(model_student)
+
+ggplot(samples) + geom_density(aes(x=bf)) + labs(
+  title=paste(
+    'Impact of area change amounting to',
+    round(sd(foxes$area),3), 
+    'on expected food quantity'
+  )
+)
+```
+Which one is the best? They all use the same causal DAG, so I could use PSIS/WAIC to assess. Weirdly, the "least confident" model is actually the best `\_(0_o)_/`
+
+```{r}
+compare(model, model_student, model_noncentered, model_student_non_centered, func=PSIS) |> plot()
+```
+
+we could also look at estimate of actual food, not expected value. I'll use the mean-centered model as it's easier to interpret
+
+```{r}
+
+food_average_area = sim(model, data=list(Area=0))
+food_1sd_increase = sim(model, data=list(Area=1))
+
+diff_in_food = tibble(diff=food_1sd_increase - food_average_area)
+
+ggplot(diff_in_food) + geom_density(aes(x=diff)) + ggtitle("Impact on food from 1sd increase in Area")
+
+```
+# Exercise 2
+
+Total causal effect of food on W. We don't stratify by anything again.
+
+```{r}
+ex2_dt = list(
+  Food = standardize(foxes$avgfood),
+  Weight = standardize(foxes$weight)
+)
+
+ex2_model = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    mu <- bw * Food,
+    bw ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=ex2_dt
+)
+
+precis(ex2_model)
+ex2_samples = extract.samples(ex2_model)
+
+ggplot(ex2_samples) + geom_density(aes(x=bw)) + labs(
+  title=paste(
+    'Impact of area change amounting to',
+    round(sd(foxes$avgfood),3), 
+    'on expected food quantity'
+  )
+)
+
+```
+
+```{r}
+weight_average_food = sim(ex2_model, data=list(Food=0))
+weight_food_increase = sim(ex2_model, data=list(Food=1))
+
+diff_in_weight = tibble(diff=weight_food_increase - weight_average_food)
+
+ggplot(diff_in_weight) + geom_density(aes(x=diff)) + ggtitle("Impact on weight from 1sd increase in food")
+
+```
+# Ex3 
+
+It looks like that more food leads to more weight, if group size does not change. However, in reality, food leads to group size increases, and these offset the impact of food availability on weight. Basically, foxes use food surplus to increase their "gang" sizes rather than gain weight.
+
+```{r}
+ex3_dt = list(
+  Food = standardize(foxes$avgfood),
+  Weight = standardize(foxes$weight),
+  Group = standardize(foxes$groupsize)
+)
+
+ex3_model = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    mu <- bf * Food + bw*Group,
+    bw ~ dnorm(0, 0.5),
+    bf ~ dnorm(0, 0.5),
+    sigma ~ dexp(1),
+    Weight ~ dnorm(mu_total, sigma_total),
+    mu_total <- bf_total * Food,
+    bf_total ~ dnorm(0, 1),
+    sigma_total ~ dexp(1)
+  ), 
+  data=ex3_dt
+)
+
+precis(ex3_model)
+ex3_samples = extract.samples(ex3_model)
+
+ggplot(ex3_samples) + geom_density(aes(x=bf, color='Direct effect')) +
+  geom_density(aes(x=bf_total, color='Total effect')) + 
+  labs(
+  title=paste(
+    'Direct effect of food on expected weight'
+  )
+)
+```
+
+# Exercise 4
+
+Can we do this with instrumental variables?
+
+```{r}
+ex4_dt = list(
+  Food = standardize(foxes$avgfood),
+  Weight = standardize(foxes$weight),
+  Group = standardize(foxes$groupsize),
+  Area = standardize(foxes$area)
+)
+
+ex4_model = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    Weight ~ dnorm(mu_total, sigma_total),
+    Food ~ dnorm(mu_f, sigma_area),
+    mu_f <- Area * ba,
+    mu <- bf * mu_f + bw*Group,
+    mu_total <- bf_total * mu_f,
+    ba ~ dnorm(0, 1),
+    bw ~ dnorm(0, 1),
+    bf ~ dnorm(0, 1),
+    bf_total ~ dnorm(0, 1),
+    sigma ~ dexp(1),
+    sigma_total ~ dexp(1),
+    sigma_area ~ dexp(1)
+  ), 
+  data=ex4_dt
+)
+
+precis(ex4_model)
+ex4_samples = extract.samples(ex4_model)
+
+ggplot(ex4_samples) + geom_density(aes(x=bf, color='direct_effect')) +
+  geom_density(aes(x=bf_total, color='total_effect')) +
+  geom_density(aes(x=bf, color='direct effect (ex3)'), data=ex3_samples) +
+  geom_density(aes(x=bf_total, color='total effect (ex3)'), data=ex3_samples) +
+  labs(
+  title=paste(
+    'Effect of food on expected weight'
+  )
+)
+
+```
+```{r}
+sim = function(n=1000) {
+  Area = rnorm(n)
+  U = rnorm(n)
+  Food = rnorm(n, 2 * Area - 0 * U)
+  Group = rnorm(n, 1 * Food + U * 0)
+  Weight = rnorm(n, 1 * Food + Group * 0.5)
+  
+  tibble(Area, Food, Group, Weight)
+}
+
+data = sim()
+
+```
+
+```{r}
+
+ex4_model_instrument = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    Weight ~ dnorm(mu_total, sigma_total),
+    #Food ~ dnorm(mu_f, sigma_area),
+    #mu_f <- Area * ba,
+    mu <- bf * Food + bw*Group,
+    mu_total <- bf_total * Food,
+    ba ~ dnorm(0, 0.5),
+    bw ~ dnorm(0, 0.5),
+    bf ~ dnorm(0, 0.5),
+    bf_total ~ dnorm(0, 0.5),
+    sigma ~ dexp(1),
+    sigma_total ~ dexp(1)
+    #sigma_area ~ dexp(1)
+  ), 
+  data=data
+)
+
+precis(ex4_model_instrument)
+ex4_instrument_samples = extract.samples(ex4_model_instrument)
+
+ggplot(ex4_instrument_samples) + geom_density(aes(x=bf, color='direct_effect')) +
+  geom_density(aes(x=bf_total, color='total_effect')) +
+  labs(
+  title=paste(
+    'Effect of food on expected weight'
+  )
+)
+```
+
+
+
