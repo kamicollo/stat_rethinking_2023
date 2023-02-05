@@ -1,0 +1,424 @@
+---
+title: "Week 4 solutions"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(rethinking)
+library(scales)
+library(dagitty)
+library(brms)
+data("foxes")
+data("WaffleDivorce")
+data("cherry_blossoms")
+
+```
+
+
+# Exercise 1
+
+Prepare data
+
+```{r}
+happiness_data  = sim_happiness(seed=1977,N_years=1000) |> 
+  filter(age > 17) |>
+  mutate(
+    age_scaled = (age - 18) / (65 - 18),
+    married_index = married + 1
+  )
+```
+
+First, fit a model with MCMC via rethinking package
+
+```{r, message=FALSE, warning=F}
+m6.9_ulam = ulam(
+  alist(
+    happiness ~dnorm(mu,sigma),
+    mu <-a[married_index] + bA * age_scaled,
+    a[married_index] ~ dnorm(0,1),
+    bA ~ dnorm(0,2),
+    sigma ~ dexp(1)
+  ),
+  data=happiness_data,
+  messages=F, 
+  log_lik = T #need to include for subsequent comparison
+)
+```
+
+Then, do the same but using quadratic approximation.
+
+```{r}
+m6.9_quap = quap(
+  alist(
+    happiness ~dnorm(mu,sigma),
+    mu <-a[married_index] + bA * age_scaled,
+    a[married_index] ~ dnorm(0,1),
+    bA ~ dnorm(0,2),
+    sigma ~ dexp(1)
+  ),
+  data=happiness_data
+)
+```
+
+Compare results - should be identical!
+
+```{r}
+precis(m6.9_ulam,depth=2)
+precis(m6.9_quap,depth=2)
+```
+How about fitting this model in brms? After some fiddling, got it to work.
+
+```{r, message=FALSE, warning=F}
+m6.9_brms = brm(
+  happiness ~ 0 + factor(married_index) + age_scaled,
+  data=happiness_data, 
+  family=gaussian(), # prior for observed data
+  prior=c(
+    prior(normal(0,1), class = "b"), #prior for intercepts
+    prior(normal(0,2), class = "b", coef = age_scaled), #prior for age_scaled coefficient
+    prior(exponential(1), class=sigma) #prior for variance
+  ),
+  silent=2, refresh=0
+)
+
+summary(m6.9_brms)
+
+```
+Now, let's fit m6.10 model (brms & ulam)
+
+```{r, echo=FALSE, message=F, warning=F}
+m6.10_ulam = ulam(
+  alist(
+    happiness ~dnorm(mu,sigma),
+    mu <- a + bA * age_scaled,
+    a ~ dnorm(0,1),
+    bA ~ dnorm(0,2),
+    sigma ~ dexp(1)
+  ),
+  data=happiness_data,
+  messages=F,
+  log_lik = T #need to include for subsequent comparison
+)
+
+```
+
+```{r}
+m6.10_brms = brm(
+  happiness ~ 1 + age_scaled,
+  data=happiness_data, 
+  family=gaussian(), # prior for observed data
+  prior=c(
+    prior(normal(0,1), class = "Intercept"), #prior for intercept
+    prior(normal(0,2), class = "b", coef = age_scaled), #prior for age_scaled coefficient
+    prior(exponential(1), class=sigma) #prior for variance
+  ),
+  silent=2, refresh=0
+)
+
+```
+Compare results to be sure.
+
+```{r}
+precis(m6.10_ulam)
+```
+```{r}
+summary(m6.10_brms)
+```
+Finally, compare models using WAIC and PSIS. First, using rethinking package. Looks like 6.9 model is better.
+
+```{r}
+compare(m6.9_ulam, m6.10_ulam)
+compare(m6.9_ulam, m6.10_ulam, func=PSIS)
+```
+To do the same with brms - for WAIC. Could not figure out how to do for PSIS.
+```{r}
+brms::waic(m6.9_brms, m6.10_brms)
+```
+
+# Exercise 2
+
+```{r}
+dt = list(
+  Food = standardize(foxes$avgfood),
+  Weight = standardize(foxes$weight),
+  Group = standardize(foxes$groupsize),
+  Area = standardize(foxes$area)
+)
+
+full_model = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    mu <- a + bf * Food + bg * Group + ba * Area,
+    a ~ dnorm(0, 1),
+    bf ~ dnorm(0, 1),
+    bg ~ dnorm(0, 1),
+    ba ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=dt
+)
+
+fg_model = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    mu <- a + bf * Food + bg * Group,
+    a ~ dnorm(0, 1),
+    bf ~ dnorm(0, 1),
+    bg ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=dt
+)
+
+ga_model = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    mu <- a + bg * Group + ba * Area,
+    a ~ dnorm(0, 1),
+    bg ~ dnorm(0, 1),
+    ba ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=dt
+)
+
+fa_model = quap(
+  flist = alist(
+    Weight ~ dnorm(mu, sigma),
+    mu <- a + bf * Food + ba * Area,
+    a ~ dnorm(0, 1),
+    bf ~ dnorm(0, 1),
+    ba ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data=dt
+)
+
+rethinking::compare(full_model, fa_model, ga_model, fg_model)
+rethinking::compare(full_model, fa_model, ga_model, fg_model, func=PSIS)
+
+```
+Full model performs best. I think none of the coefficients have a causal meaning..
+
+ - A -> we control for F, so it's effect is no longer present;
+ - F -> A mediator, so we don't really have a meaning for it
+ - G -> this may still have a meaning as direct effect, but not sure if it's precise given we control for A 
+
+
+```{r}
+precis(full_model)
+
+dag = dagitty("dag {
+  Area -> Food;
+  Food -> Group_Size;
+  Group_Size -> Weight;
+  Food -> Weight
+}", layout = T)
+
+outcomes(dag) = "Food"
+exposures(dag) = "Area"
+
+plot(dag)
+```
+
+# Exercise 3
+
+```{r}
+known_blossoms = cherry_blossoms %>% drop_na() |> 
+  mutate(
+    st_temp = standardize(temp),
+    doy_offset = doy - min(doy)
+  )
+summary(known_blossoms)
+
+ggplot(known_blossoms) + geom_point(aes(x=temp, y=doy_offset))
+```
+
+```{r}
+
+#Poisson models
+#model 1 - quadratic relationship; let's use brms
+
+quadratic_blossoms_poisson = brm(
+  doy_offset ~ 1 + temp + I(temp^2),
+  data = known_blossoms,
+  family = poisson(),
+  prior = c(
+    prior(normal(0,1), class = "Intercept"), #prior for intercept - this is on log scale, though
+    prior(normal(0,1), class='b', coef=temp), # prior for linear coefficient
+    prior(normal(0,1), class='b') # prior for quadratic coefficient
+  ),
+  refresh=0, silent = 2
+)
+
+
+#model 2 - linear relationship; let's use brms
+
+linear_blossoms_poisson = brm(
+  doy_offset ~ 1 + temp,
+  data = known_blossoms,
+  family = poisson(),
+  prior = c(
+    prior(normal(0,1), class = "Intercept"), #prior for intercept
+    prior(normal(0,1), class='b', coef=temp) # prior for linear coefficient
+  ),
+  refresh=0, silent = 2
+)
+
+
+#nagative binomial models
+
+quadratic_blossoms_negb = brm(
+  doy_offset ~ 1 + temp + I(temp^2),
+  data = known_blossoms,
+  family = negbinomial(),
+  prior = c(
+    prior(normal(0,1), class = "Intercept"), #prior for intercept - this is on log scale, though
+    prior(normal(0,1), class='b', coef=temp), # prior for linear coefficient
+    prior(normal(0,1), class='b') # prior for quadratic coefficient
+  ),
+  refresh=0, silent = 2
+)
+
+
+#model 2 - linear relationship; let's use brms
+
+linear_blossoms_negb = brm(
+  doy_offset ~ 1 + temp,
+  data = known_blossoms,
+  family = negbinomial(),
+  prior = c(
+    prior(normal(0,1), class = "Intercept"), #prior for intercept
+    prior(normal(0,1), class='b', coef=temp) # prior for linear coefficient
+  ),
+  refresh=0, silent = 2
+)
+
+#normal models
+
+quadratic_blossoms_norm = brm(
+  doy_offset ~ 1 + temp + I(temp^2),
+  data = known_blossoms,
+  family = gaussian(),
+  prior = c(
+    prior(normal(0,1), class = "Intercept"), #prior for intercept - this is on log scale, though
+    prior(normal(0,1), class='b', coef=temp), # prior for linear coefficient
+    prior(normal(0,1), class='b') # prior for quadratic coefficient
+  ),
+  refresh=0, silent = 2
+)
+
+
+#model 2 - linear relationship; let's use brms
+
+linear_blossoms_norm = brm(
+  doy_offset ~ 1 + temp,
+  data = known_blossoms,
+  family = gaussian(),
+  prior = c(
+    prior(normal(0,1), class = "Intercept"), #prior for intercept
+    prior(normal(0,1), class='b', coef=temp) # prior for linear coefficient
+  ),
+  refresh=0, silent = 2
+)
+
+```
+
+
+```{r}
+#model 3 - spline relationship; let's use brms
+# see https://discourse.mc-stan.org/t/setting-custom-knots-with-a-b-spline-bs-bs/15380/5
+
+library(splines)
+num_knots <- 15
+knot_list <- quantile(known_blossoms$temp, probs = seq(from = 0, to = 1, length.out = num_knots))
+
+B <- bs(known_blossoms$temp,
+        knots = knot_list[-c(1, num_knots)], 
+        degree = 3, 
+        intercept = TRUE)
+
+spline_data = known_blossoms |> mutate(B=B)
+
+spline_blossoms_poisson = brm(
+  doy_offset ~ 1 + B,
+  data = spline_data,
+  family = poisson(),
+  prior = c(
+    prior(normal(100, 10), class = Intercept),
+    prior(normal(0, 10), class = b)
+  ),
+  refresh=0, silent = 2
+)
+
+spline_blossoms_negb = brm(
+  doy_offset ~ 1 + B,
+  data = spline_data,
+  family = negbinomial(),
+  prior = c(
+    prior(normal(100, 10), class = Intercept),
+    prior(normal(0, 10), class = b)
+  ),
+  refresh=0, silent = 2
+)
+
+spline_blossoms_norm = brm(
+  doy_offset ~ 1 + B,
+  data = spline_data,
+  family = gaussian(),
+  prior = c(
+    prior(normal(100, 10), class = Intercept),
+    prior(normal(0, 10), class = b)
+  ),
+  refresh=0, silent = 2
+)
+
+```
+Gaussian spline model seems to be the best.
+```{r}
+comp_results = brms::waic(
+  quadratic_blossoms_poisson,
+  linear_blossoms_poisson, 
+  spline_blossoms_poisson,
+  quadratic_blossoms_norm,
+  linear_blossoms_norm,
+  spline_blossoms_norm,
+  quadratic_blossoms_negb,
+  linear_blossoms_negb,
+  spline_blossoms_negb
+) 
+
+comp_results$diffs
+```
+
+```{r}
+offset = min(spline_data$doy)
+
+fitted(spline_blossoms_norm) |> #get predictions
+  bind_cols(spline_data) |>
+  ggplot(aes(x = temp, y = doy, ymin = offset + Q2.5, ymax = offset + Q97.5)) + 
+  geom_hline(yintercept = fixef(spline_blossoms_norm)[1, 1] + offset, linetype = 2) +
+  geom_point(color = "steelblue") +
+  geom_ribbon(alpha = 2/3) +
+  labs(x = "temperature",
+       y = "day in year") +
+  theme_classic()
+
+```
+
+
+Predict - can't get splines to work for predictions, though...
+
+```{r}
+predict(linear_blossoms_negb, newdata=data.frame(temp=9)) + min(known_blossoms$doy)
+predict(linear_blossoms_norm, newdata=list(temp=9)) + min(known_blossoms$doy)
+
+```
+```{r}
+tibble(doy = predict(linear_blossoms_negb, newdata=data.frame(temp=9), summary=F) + 
+  min(known_blossoms$doy)) |>
+  ggplot() + geom_histogram(aes(x=doy), binwidth = 1, color='white')
+```
+
