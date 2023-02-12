@@ -1,0 +1,186 @@
+---
+title: "Week 5"
+author: "Aurimas Racas"
+date: '2023-02-12'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+library(rethinking)
+library(scales)
+library(dagitty)
+library(brms)
+library(tidybayes)
+library(marginaleffects)
+data("NWOGrants")
+data("UFClefties")
+```
+
+## Exercise 1
+
+The data in data(NWOGrants) are outcomes for scientific funding applications for the Netherlands Organization for Scientific Research (NWO) from 2010–2012 (see van der Lee and Ellemers doi:10.1073/pnas.1510159112). These data have a structure similar to the UCBAdmit data discussed in Chapter 11 and in lecture. There are applications and each has an associated gender (of the lead researcher).
+But instead of departments, there are disciplines. Draw a DAG for this sample. Then use the backdoor criterion and a binomial GLM to estimate the TOTAL causal effect of gender on grant awards.
+
+```{r}
+dag = dagitty("dag {
+  Gender -> Awards;
+  Gender -> Discipline;
+  Discipline -> Awards;
+}", layout = T)
+
+outcomes(dag) = "Awards"
+exposures(dag) = "Gender"
+
+plot(dag)
+```
+
+To estimate a total causal effect, we do not need to control for anything.
+
+Let's think about priors. Awards are rare - presumably, 10-20% of applications. How to get that? It must be drawn from normal distribution with negative mean. Let's try a couple of examples.
+
+```{r}
+
+pos_values = list(
+  c("m"=-1, "s"=1),
+  c("m"=-2, "s"=1),
+  c("m"=-1, "s"=0.5),
+  c("m"=-2, "s"=0.5)
+)
+
+plots = lapply(pos_values, function(vals) {
+  inv_logit(rnorm(10000, vals['m'], vals['s'])) |> 
+    as_tibble_col("x") |> 
+    ggplot() + geom_density(aes(x=x)) + 
+    ggtitle(paste("Mu:", vals['m'], "sigma:", vals['s']))
+})
+
+grid.arrange(grobs=plots)
+
+```
+To be on the safe side, I'll go with a semi-informative prior: N(-1, 0.5).
+
+
+```{r, warning=F, echo=F, message=F}
+ex1_model = brm(
+  formula = awards | trials(applications) ~ 0 + gender,
+  data = NWOGrants, 
+  family=binomial, 
+  prior = c(prior(normal(-1, 0.5), class='b')),
+  refresh=0, silent = 2
+)
+```
+
+```{r}
+summary(ex1_model)
+plot(ex1_model)
+```
+What is the causal effect? Looks like Men have c. 3% higher probability, on average, to get an award.
+
+```{r}
+
+as_draws_df(ex1_model, variable=c('b_genderf', 'b_genderm')) |>
+  ggplot() +
+  geom_density(aes(x=inv_logit(b_genderm),  color='male')) +
+  geom_density(aes(x=inv_logit(b_genderf), color='female')) +
+  xlab("Probability")
+
+as_draws_df(ex1_model, variable=c('b_genderf', 'b_genderm')) |>
+  mutate(effect = inv_logit(b_genderm) - inv_logit(b_genderf)) |> ggplot() +
+  geom_density(aes(x=effect, color='effect'))
+
+```
+## Exercise 2
+
+Now estimate the DIRECT causal effect of gender on grant awards. Use the same DAG as above to justify one or more binomial models. Compute the average direct causal effect of gender, weighting each discipline in proportion to the number of applications in the sample. Refer to the marginal effect example in Lecture 9 for help.
+
+We need to condition on discipline to get direct effects. 
+
+
+```{r, warning=F, echo=F, message=F}
+ex2_model = brm(
+  formula = awards | trials(applications) ~ 0 + gender:discipline,
+  data = NWOGrants, 
+  family=binomial, 
+  prior = c(prior(normal(-1, 0.5), class='b')),
+  refresh=0, silent = 2
+)
+```
+
+
+```{r}
+summary(ex2_model)
+```
+
+
+First, let's display results by discipline.
+
+```{r}
+clean_results = as_draws_df(ex2_model) |> 
+  pivot_longer(everything()) |>
+  mutate(tmp = str_split_fixed(name, fixed(":"), 2)) |>
+  mutate(gender = str_remove(tmp[,1], "b_gender")) |>
+  mutate(discipline = str_remove(tmp[,2], "discipline")) |>
+  select(gender, discipline, value) |>
+  pivot_wider(discipline, names_from= gender, values_from=value, values_fn=list) |>
+  select(discipline, f, m) |>
+  filter(discipline != "") |> 
+  unnest(cols=c(f, m)) |> 
+  mutate(effect = inv_logit(m) - inv_logit(f))
+
+
+ggplot(clean_results) + 
+  geom_density(aes(x=effect, color=discipline)) + xlab("Male advantage") +
+  theme(legend.position = "bottom") +
+  scale_color_brewer("qual", palette = "Set1")
+  
+```
+Now, to display the "weighted average" effect, we will need to simulate.
+
+```{r}
+
+by_disc = NWOGrants |> 
+  group_by(discipline) |> summarize(applications = sum(applications))
+
+
+all_male = by_disc |> mutate(gender = 'm')
+all_female = by_disc |> mutate(gender = 'f')
+
+
+male_predictions = predict(
+  ex2_model, 
+  newdata=all_male, 
+  summary=F
+)
+
+female_predictions = predict(
+  ex2_model, 
+  newdata=all_female, 
+  summary=F
+)
+
+male_award_rate = apply(male_predictions / by_disc$applications, 1, mean)
+
+female_award_rate = apply(female_predictions / by_disc$applications, 1, mean)
+
+(male_award_rate - female_award_rate) |>
+  as_tibble_col("x") |>
+  ggplot() + geom_density(aes(x=x), bw=0.005) + 
+  xlab("Male advantage (weighted average)") +
+  xlim(-0.3,0.3)
+
+```
+The direct effect appears to be smaller than the overall effect, and just somewhat above zero. As a result, it may be that less awards granted to females are due to structural differences in the fields they work in rather than direct discrimination in award process.
+
+```{r}
+comparisons(ex2_model, variables="gender", type='link', by=T)
+```
+
+
+
+
+
+
