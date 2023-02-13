@@ -172,11 +172,25 @@ female_award_rate = apply(female_predictions / by_disc$applications, 1, mean)
   xlab("Male advantage (weighted average)") +
   xlim(-0.3,0.3)
 
+
 ```
 The direct effect appears to be smaller than the overall effect, and just somewhat above zero. As a result, it may be that less awards granted to females are due to structural differences in the fields they work in rather than direct discrimination in award process.
 
 ```{r}
-comparisons(ex2_model, variables="gender", type='link', by=T)
+options("marginaleffects_posterior_interval" = "hdi")
+
+comparisons(
+  ex2_model, variables="gender", type='link', 
+  by='discipline', 
+  transform_pre = function (hi, lo) inv_logit(hi) - inv_logit(lo)
+)
+
+comparisons(
+  ex2_model, variables="gender", type='link', 
+  by=T, 
+  transform_pre = function (hi, lo) inv_logit(hi) - inv_logit(lo)
+)
+
 ```
 
 
