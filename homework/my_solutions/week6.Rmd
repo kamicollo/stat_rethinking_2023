@@ -4,7 +4,7 @@ output: github_document
 ---
 
 ```{r setup, warning=F, message=FALSE}
-
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, error=FALSE) 
 library(tidyverse)
 library(ggplot2)
 library(gridExtra)
@@ -369,7 +369,7 @@ comparisons(
 ```
 Another way - plot using `brms::marginal_effects`. Here, the impact of tank-level effect inclusion is very clear.
 
-```{r, message=F, warning=f, error=F}
+```{r, message=F, warning=F, error=F}
 
 c_eff_g = conditional_effects(causal_m, effects=c("size:pred"), re_formula=NULL) #with groups
 c_eff_nog = conditional_effects(causal_m, effects=c("size:pred"), re_formula=NA) #without groups
@@ -386,7 +386,7 @@ Now estimate the causal effect of density on survival. Consider whether pred mod
 
 I'll try the ordered category approach.
 
-```{r, message=F, warning=f, error=F}
+```{r, message=F, warning=F, error=F}
 better_frogs = reedfrogs |> 
     mutate(tank = as.factor(row_number())) |>
     mutate(ord_density = factor(density, ordered=T))
@@ -429,7 +429,7 @@ plt[[1]] + ggtitle(('Group effects')) + ylab("Average survival")
 ```
 What if we believe that size also interacts with density?
 
-```{r, message=F, warning=f, error=F}
+```{r, message=F, warning=F, error=F}
 density_model_3 = brm(
   formula = surv | trials(density) ~ 0 + (1 | tank) + pred:size + mo(ord_density):pred + mo(ord_density):pred:size,
   data = better_frogs, 
