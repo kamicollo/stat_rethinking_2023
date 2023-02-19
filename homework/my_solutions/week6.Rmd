@@ -1,0 +1,487 @@
+---
+title: "Week 6 HW"
+output: github_document
+---
+
+```{r setup, warning=F, message=FALSE}
+
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+library(rethinking)
+library(scales)
+library(dagitty)
+library(brms)
+library(tidybayes)
+library(marginaleffects)
+
+data("reedfrogs")
+
+```
+
+
+# Ex 1
+
+Conduct a prior predictive simulation for the Reedfrog model. By this I mean to simulate the prior distribution of tank survival probabilities $\alpha_j$. Start by using this prior:
+$$
+\begin{aligned}
+\alpha_j & \sim \operatorname{Normal}(\bar{\alpha}, \sigma) \\
+\bar{\alpha} & \sim \operatorname{Normal}(0,1) \\
+\sigma & \sim \operatorname{Exponential}(1)
+\end{aligned}
+
+$$
+Be sure to transform the $\alpha_j$ values to the probability scale for plotting and summary. How does increasing the width of the prior on $\sigma$ change the prior distribution of $\alpha_j$? You might try Exponential(10) and Exponential(0.1) for example.
+
+```{r}
+
+N = 100000
+sigmas_to_try = round(exp(seq(from=-log(10), to=log(10), by=0.4)),2) #a range of sigma values
+
+#simulate 10k observations of a_j for each sigma
+aj_matrix = sapply(sigmas_to_try, function (exp_rate) {
+  sigma = rexp(N, exp_rate)
+  a_bar = rnorm(N, 0, 1)
+  a_j = rnorm(N, a_bar, sigma)  
+  a_j
+})
+
+colnames(aj_matrix) = sigmas_to_try
+
+aj_matrix |> 
+  as_tibble() |> 
+  pivot_longer(everything(), names_to = "sigma", values_to = "a_j") |>
+  mutate(p = inv_logit(a_j)) |>
+  mutate(sigma = paste("σ =", sigma)) |>
+  ggplot() + geom_density(aes(x=p)) + 
+  facet_wrap(~sigma, nrow=2) + theme_bw() + 
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks=c(0,0.5, 1))
+
+
+
+```
+
+# Ex 2
+
+Revisit the Reedfrog survival data, data(reedfrogs). Start with the varying  effects model from the book and lecture. Then modify it to estimate the causal effects of the treatment variables pred and size, including how size might modify the effect of predation. An easy approach is to estimate an effect for each combination of pred and size. Justify your model with a DAG of this experiment.
+
+```{r}
+
+dag = dagitty("dag {
+    Size -> Survival;
+    Predators -> Survival;
+    Density -> Survival;
+    Tank -> Survival;
+}", layout=T)
+
+outcomes(dag) = "Survival"
+exposures(dag) = c("Predators", "Size")
+
+plot(dag)
+```
+
+First, replicate the lecture model in BRMS
+
+```{r}
+mST <- ulam(
+  alist(
+    surv ~ dbinom(density, p),
+    logit(p) <- a[tank] ,
+    a[tank] ~ dnorm( a_bar, sigma),
+    a_bar ~ dnorm(0, 1.5),
+    sigma ~ dexp(1)
+  ), 
+  data=reedfrogs |> mutate(tank = as.factor(row_number())), 
+  chains=4, iter=2000, messages=F, cmdstan=T, refresh=0)
+
+```
+
+In BRMS, it does not seem it is possible to do a basic centered parameterization, it has built-in non-centered parameterization.. So the best I can do is to make $\sigma$ to be the same, but these models won't be fully equivalent.
+
+```{r, warning=F, message=FALSE}
+
+replicated_model = brm(
+  formula = surv | trials(density) ~ 0 + (1 | tank),
+  data = reedfrogs |> mutate(tank = as.factor(row_number())), 
+  family=binomial,
+  prior = c(
+    prior(exponential(1), class = sd, group = tank)
+  ),
+  refresh= 0, 
+  silent = 2
+)
+
+```
+
+Note: a lot of BRMS examples use formula equivalent to `surv | trials(density) ~ 1 + (1 | tank)`. But that's not what the model is. This translates to a model with an additional intercept:
+
+$$
+\begin{aligned}
+S \sim & \operatorname{Binomial}(D, p) \\
+\operatorname{logit}(p) & = \beta + \alpha_j \\
+\alpha_j & \sim \operatorname{Normal}(\bar{\alpha}, \sigma) \\
+\bar{\alpha} & \sim \operatorname{Normal}(0,1) \\
+\beta & \sim \operatorname{Normal}(0,1) \\
+\sigma & \sim \operatorname{Exponential}(1)
+\end{aligned}
+$$
+```{r, echo=FALSE, warning=F, message=FALSE}
+
+replicated_model_wrong = brm(
+  formula = surv | trials(density) ~ 1 + (1 | tank),
+  data = reedfrogs |> mutate(tank = as.factor(row_number())), 
+  family=binomial,
+  prior = c(
+    prior(normal(0, 1), class = Intercept),
+    prior(exponential(1), class = sd, group = tank)
+  ),
+  refresh= 0, 
+  silent = 2
+)
+
+```
+
+
+We can see that in the estimates for $\alpha_j$ produced by the three models. The blue dots are offset - approximately by the $\beta$ parameter (~1.3). Interestingly, adding the beta, we get closer to ULAM estimates, and not the BRMS intercept-free estimates.
+
+```{r, fig.height=4, fig.width=7}
+
+beta = fixef(replicated_model_wrong)[1]
+
+tibble(
+  tank = as.factor(1:48),
+  aj_wrong = ranef(replicated_model_wrong)$tank[1:48],
+  aj_wrong_plus_beta = ranef(replicated_model_wrong)$tank[1:48] + beta,
+  aj_bmrs = ranef(replicated_model)$tank[1:48],
+  aj_ulam = precis(mST, depth=2)[1:48,1]
+) |> pivot_longer(-c(tank), names_to="model", values_to="aj") |>
+  ggplot() + 
+  geom_point(aes(x=tank, y=aj, color=model, shape=model), alpha=0.7) +
+  theme_bw() + theme(
+    legend.position = "bottom", 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+
+
+```
+
+It's also interesting that brms does not save the population parameter ($\bar{\alpha}$) at all.. we can peek at generated STAN code - it has $z_1$ parameters (that's the standardized effects, a.k.a. Z-scores), but what about `r_1_1`? Are they saved?
+
+```{r}
+cat(replicated_model$model)
+```
+
+Let's do a non-centered parameterization with ulam and compare:
+
+```{r, warning=F, message=FALSE}
+
+mST_non_centered <- ulam(
+  alist(
+    surv ~ dbinom(density, p),
+    logit(p) <- a[tank],
+    save> vector[48]:a <<- a_bar + za * sigma,
+    vector[48]:za ~ dnorm(0, 1),
+    a_bar ~ dnorm(0, 1.5),
+    sigma ~ dexp(1)
+  ), 
+  data=reedfrogs |> mutate(tank = as.factor(row_number())), 
+  chains=4, iter=2000, messages=F, cmdstan=T, refresh=0)
+
+cat(mST_non_centered@model)
+```
+
+
+Looks like BRMS reports the non-standardized a (below is the plot of the distribution of the a[1]). That makes sense, given this is the parameter of interest, but the implementation of that is weird..
+
+```{r}
+za = extract.samples(mST_non_centered)$za[,1]
+a = extract.samples(mST_non_centered)$a[,1]
+
+brms_a = ranef(replicated_model, summary=F)$tank[,1,1]
+
+dt = tibble(za = za, a=a, brms = brms_a) 
+
+ggplot(dt) +
+  geom_density(aes(x=za, color="ULAM z_a")) +
+  geom_density(aes(x=a, color="ULAM a")) +
+  geom_density(aes(x=brms, color="BRMS ?")) +
+  xlab("parameter")
+```
+
+## Fitting a model for size & predator causal effects
+
+```{r}
+
+causal_m = brm(
+  formula = surv | trials(density) ~ 0 + (1 | tank) + pred:size,
+  data = reedfrogs |> mutate(tank = as.factor(row_number())), 
+  family=binomial,
+  prior = c(
+    prior(exponential(1), class = sd, group = tank),
+    prior(normal(0, 1.5), class=b)
+  ),
+  refresh= 0, 
+  silent = 2
+)
+
+summary(causal_m)
+```
+
+Now, let's estimate causal effects of predators. We'll do it first for the small sizes, then for large ones. How do we deal with tanks? One approach is to exclude tank effects. Let's do that first.
+
+```{r}
+
+#predict survival of no predator / small
+small_no_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "no", 
+    size = "small", 
+    density=100
+  ),
+  re_formula = NA
+)
+
+#predict survival of predator / small
+small_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "pred", 
+    size = "small", 
+    density=100
+  ),
+  re_formula = NA
+)
+
+#predict survival of no predator / small
+big_no_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "no", 
+    size = "big", 
+    density=100
+  ),
+  re_formula = NA
+)
+
+#predict survival of predator / small
+big_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "pred", 
+    size = "big", 
+    density=100
+  ),
+  re_formula = NA
+)
+
+
+```
+
+```{r}
+contrasts = tibble(
+  surv_prob_small = (small_predator - small_no_predator) / 100,
+  surv_prob_big = (big_predator - big_no_predator) / 100
+) 
+
+ggplot(contrasts) + 
+  geom_density(aes(x=surv_prob_small, color='Small sizes', linetype='No tank-effects')) +
+  geom_density(aes(x=surv_prob_big, color='Big sizes', linetype='No tank-effects')) +
+  xlab("Predator effect")
+
+```
+What if we wanted to include the tanks? We can do that, too.
+
+```{r}
+#predict survival of no predator / small
+small_no_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "no", 
+    size = "small", 
+    density=100,
+    tank = 1:48
+  )
+)
+
+#predict survival of predator / small
+small_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "pred", 
+    size = "small", 
+    density=100,
+    tank = 1:48
+  )
+)
+
+#predict survival of no predator / small
+big_no_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "no", 
+    size = "big", 
+    density=100,
+    tank = 1:48
+  )
+)
+
+#predict survival of predator / small
+big_predator = posterior_predict(
+  causal_m, 
+  newdata = list(
+    pred = "pred", 
+    size = "big", 
+    density=100,
+    tank = 1:48
+  )
+)
+
+contrasts_by_tank = tibble(
+  surv_prob_small = as.numeric(small_predator - small_no_predator) / 100,
+  surv_prob_big = as.numeric(big_predator - big_no_predator) / 100
+) 
+
+ggplot(contrasts_by_tank) + 
+  geom_density(aes(x=surv_prob_small, color='Small sizes', linetype='With tank effects')) +
+  geom_density(aes(x=surv_prob_big, color='Big sizes', linetype='With tank effects')) +
+  xlab("Predator effect") +
+  geom_density(aes(x=surv_prob_small, color='Small sizes', linetype='No tank effects'), data=contrasts) +
+  geom_density(aes(x=surv_prob_big, color='Big sizes', linetype='No tank effects') , data=contrasts)
+
+
+```
+Comparing to marginal effects produced by `marginal effects` model:
+
+```{r}
+options("marginaleffects_posterior_interval" = "hdi")
+
+comparisons(
+  causal_m, variables="pred", type='link', 
+  by='size', 
+  transform_pre = function (hi, lo) inv_logit(hi) - inv_logit(lo),
+  re_formula=NA #pass to brms to exclude group effects
+)
+```
+Another way - plot using `brms::marginal_effects`. Here, the impact of tank-level effect inclusion is very clear.
+
+```{r, message=F, warning=f, error=F}
+
+c_eff_g = conditional_effects(causal_m, effects=c("size:pred"), re_formula=NULL) #with groups
+c_eff_nog = conditional_effects(causal_m, effects=c("size:pred"), re_formula=NA) #without groups
+
+p1 = plot(c_eff_g, plot=F)[[1]] + ggtitle(('Group effects')) + ylab("Average survival")
+p2 = plot(c_eff_nog, plot=F)[[1]] + ggtitle(('No group effects')) + ylab("Average survival")
+
+grid.arrange(grobs = list(p1, p2), nrow=1)
+```
+
+# Ex 3
+
+Now estimate the causal effect of density on survival. Consider whether pred modifies the effect of density. There are several good ways to include density in your Binomial GLM. You could treat it as a continuous regression variable (possibly standardized). Or you could convert it to an ordered category (with three levels). Compare the σ (tank standard deviation) posterior distribution to σ from your model in Problem 2. How are they different? Why?
+
+I'll try the ordered category approach.
+
+```{r, message=F, warning=f, error=F}
+better_frogs = reedfrogs |> 
+    mutate(tank = as.factor(row_number())) |>
+    mutate(ord_density = factor(density, ordered=T))
+
+density_model = brm(
+  formula = surv | trials(density) ~ 0 + (1 | tank) + pred:size + mo(ord_density):pred,
+  data = better_frogs, 
+  family=binomial,
+  prior = c(
+    prior(exponential(1), class = sd, group = tank),
+    prior(normal(0, 1.5), class=b)
+    
+  ),
+  refresh= 0, 
+  silent = 2
+)
+
+summary(density_model)
+
+```
+Let's peek at STAN code to see how this is expressed.
+
+```{r}
+cat(density_model$model)
+```
+
+Let's estimate the causal effect of density. I'll just use packages this time.
+
+```{r}
+
+plt = conditional_effects(
+  density_model, 
+  effects=c("ord_density:pred"), 
+  re_formula=NULL #with groups
+) |> plot(plot=F)
+
+plt[[1]] + ggtitle(('Group effects')) + ylab("Average survival")
+
+
+```
+What if we believe that size also interacts with density?
+
+```{r, message=F, warning=f, error=F}
+density_model_3 = brm(
+  formula = surv | trials(density) ~ 0 + (1 | tank) + pred:size + mo(ord_density):pred + mo(ord_density):pred:size,
+  data = better_frogs, 
+  family=binomial,
+  prior = c(
+    prior(exponential(1), class = sd, group = tank),
+    prior(normal(0, 1.5), class=b)
+    
+  ),
+  refresh= 0, 
+  silent = 2
+)
+
+summary(density_model_3)
+```
+```{r}
+plt = conditional_effects(
+  density_model_3, 
+  effects=c("size:pred"), 
+  re_formula=NA #without groups
+) |> plot(plot=F)
+
+p1 = plt[[1]] + ggtitle(('3-way interaction model')) + ylab("Average survival")
+
+plt = conditional_effects(
+  density_model, 
+  effects=c("size:pred"), 
+  re_formula=NA #without groups
+) |> plot(plot=F)
+
+p2 = plt[[1]] + ggtitle(('2-way interaction model')) + ylab("Average survival")
+
+grid.arrange(grobs=list(p1, p2), nrow=1)
+
+```
+Numerically:
+
+```{r}
+comparisons(
+  density_model, variables="pred", type='link', 
+  by=c('size', 'ord_density'), 
+  transform_pre = function (hi, lo) inv_logit(hi) - inv_logit(lo),
+  re_formula=NA #pass to brms to exclude group effects
+)
+```
+
+```{r}
+comparisons(
+  density_model_3, variables="pred", type='link', 
+  by=c('size', 'ord_density'), 
+  transform_pre = function (hi, lo) inv_logit(hi) - inv_logit(lo),
+  re_formula=NA #pass to brms to exclude group effects
+)
+```
+
