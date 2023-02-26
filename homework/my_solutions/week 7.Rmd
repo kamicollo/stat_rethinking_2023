@@ -1,0 +1,100 @@
+---
+title: "Week 7"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(rethinking)
+library(brms)
+library(tidybayes)
+library(marginaleffects)
+data("bangladesh")
+library(dagitty)
+
+```
+
+
+This homework set reuses the code from the lecture, but it will be challenging because it requires thinking about how to stratify by weird variables like number of children and age. Go slow and know that if you finish any of it, you are my hero. As hard as these problems are, real research is even harder.
+
+# Ex 1
+
+The data in data(bangladesh) are 1934 women from the 1989 Bangladesh Fertility Survey. For each woman, we know which district she lived in, her number of living.children, her age.centered, whether she lived in an urban center, and finally whether or not she used contraception (use.contraception). In the lecture, we estimated the total effect of urban residence on contraceptive use. Using the DAG from lecture, or your own version if you prefer, now estimate only the direct effect of urban residence on contraceptive use.
+
+```{r}
+
+bangladesh = bangladesh |> mutate(district = factor(district), urban = factor(urban))
+
+head(bangladesh)
+summary(bangladesh)
+```
+
+First, let's draw out a DAG and also test if its assumptions appear right.
+
+```{r}
+dag = dagitty("dag {
+    district -> use.contraception;
+    urban -> use.contraception;
+    district -> urban;
+    living.children -> use.contraception;
+    age.centered -> living.children;
+    age.centered -> use.contraception;
+    urban -> living.children;
+    use.contraception [outcome]
+    urban [exposure]
+}", layout=T)
+
+plot(dag)
+
+localTests(dag, bangladesh)
+```
+Now, let's fit the model. First, I partially replicate the lecture's model in brms. Partially, because you can't sneak in $\bar{\alpha}$ and $\bar{\beta}$ in the varying intercepts. Which feels super dumb.
+
+```{r}
+
+formula = use.contraception ~ 1 + (1 | district) + (1 | district:urban)
+
+lecture_model = brm(
+  formula, 
+  data=bangladesh,
+  prior = c(
+    prior(normal(0, 1), class=Intercept),
+    prior(exponential(1), class = sd)
+  ),
+  family=bernoulli,
+  refresh = 0,
+  silent = 2
+)
+
+summary(lecture_model)
+
+```
+
+```{r}
+
+dat <- list(
+C = bangladesh$use.contraception,
+D = as.integer(bangladesh$district),
+U = ifelse(bangladesh$urban==1,1,0) )
+
+
+mCDUnc <- ulam(
+  alist(
+  C ~ bernoulli(p),
+  logit(p) <- ab + a[D] + b[D]*U,
+  # define effects using other parameters
+  save> vector[61]:a <<- za*sigma,
+  save> vector[61]:b <<- zb*tau,
+  # z-scored effects
+  vector[61]:za ~ normal(0,1),
+  vector[61]:zb ~ normal(0,1),
+  # ye olde hyper-priors
+  ab ~ normal(0,1),
+  c(sigma,tau) ~ exponential(1)
+) , data=dat , chains=4 , cores=4 )
+
+precis(mCDUnc)
+```
+
